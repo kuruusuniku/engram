@@ -1,6 +1,6 @@
 {
   "name": "@sukep/engram",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "MCP server for persistent memory - stores, searches, and associates conversation logs using hybrid search (FTS5 + vector) with A-MEM style note structuring",
   "type": "module",
   "main": "dist/index.js",
