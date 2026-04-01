@@ -302,6 +302,55 @@ describe("SQLiteAdapter", () => {
       // Should not throw, may return empty results
       expect(Array.isArray(results)).toBe(true);
     });
+
+    it("should find Japanese content with trigram tokenizer", async () => {
+      await adapter.saveNote({
+        tenant_id: tenantId,
+        role: "user",
+        content: "engram の検索アーキテクチャ: FTS5全文検索がメインエンジン",
+        keywords: ["検索", "FTS5", "アーキテクチャ"],
+      });
+      await adapter.saveNote({
+        tenant_id: tenantId,
+        role: "assistant",
+        content: "記憶検索の仕組みを解説します。ハイブリッド検索で高速化。",
+        keywords: ["記憶", "検索", "ハイブリッド"],
+      });
+
+      // Multi-keyword Japanese AND search
+      const results = await adapter.fullTextSearch("記憶検索 仕組み", {
+        tenant_id: tenantId,
+      });
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0].note.content).toContain("記憶検索");
+
+      // Single Japanese keyword
+      const results2 = await adapter.fullTextSearch("全文検索", {
+        tenant_id: tenantId,
+      });
+      expect(results2.length).toBeGreaterThan(0);
+
+      // Mixed Japanese + English
+      const results3 = await adapter.fullTextSearch("FTS5 検索", {
+        tenant_id: tenantId,
+      });
+      expect(results3.length).toBeGreaterThan(0);
+    });
+
+    it("should handle short Japanese terms (< 3 chars) via LIKE fallback", async () => {
+      await adapter.saveNote({
+        tenant_id: tenantId,
+        role: "user",
+        content: "AI技術の最新動向について調査する",
+        keywords: ["AI", "技術"],
+      });
+
+      // "AI" is 2 chars — too short for trigram, should fallback to LIKE
+      const results = await adapter.fullTextSearch("AI", {
+        tenant_id: tenantId,
+      });
+      expect(Array.isArray(results)).toBe(true);
+    });
   });
 
   // --- Stats Tests ---

@@ -73,6 +73,75 @@ export class SQLiteAdapter implements StorageAdapter {
     return this.vecEnabled;
   }
 
+  /**
+   * Ensure FTS5 table uses trigram tokenizer.
+   * Migrates from unicode61 to trigram if needed (for Japanese support).
+   */
+  private ensureFtsTrigram(db: Database.Database): void {
+    const ftsExists = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='notes_fts'"
+      )
+      .get();
+
+    if (ftsExists) {
+      // Check if existing FTS table uses trigram
+      const createSql = db
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND name='notes_fts'"
+        )
+        .get() as { sql: string } | undefined;
+
+      if (createSql && !createSql.sql.includes("trigram")) {
+        // Migrate: drop old unicode61 FTS and rebuild with trigram
+        db.exec(`
+          DROP TRIGGER IF EXISTS notes_ai;
+          DROP TRIGGER IF EXISTS notes_ad;
+          DROP TRIGGER IF EXISTS notes_au;
+          DROP TABLE notes_fts;
+        `);
+        // Fall through to create new FTS table below
+      } else {
+        return; // Already trigram, nothing to do
+      }
+    }
+
+    db.exec(`
+      CREATE VIRTUAL TABLE notes_fts USING fts5(
+        content,
+        summary,
+        keywords,
+        tags,
+        context_desc,
+        content=notes,
+        content_rowid=rowid,
+        tokenize='trigram'
+      );
+
+      -- Triggers to keep FTS index in sync
+      CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+        INSERT INTO notes_fts(rowid, content, summary, keywords, tags, context_desc)
+        VALUES (new.rowid, new.content, new.summary, new.keywords, new.tags, new.context_desc);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+        INSERT INTO notes_fts(notes_fts, rowid, content, summary, keywords, tags, context_desc)
+        VALUES ('delete', old.rowid, old.content, old.summary, old.keywords, old.tags, old.context_desc);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
+        INSERT INTO notes_fts(notes_fts, rowid, content, summary, keywords, tags, context_desc)
+        VALUES ('delete', old.rowid, old.content, old.summary, old.keywords, old.tags, old.context_desc);
+        INSERT INTO notes_fts(rowid, content, summary, keywords, tags, context_desc)
+        VALUES (new.rowid, new.content, new.summary, new.keywords, new.tags, new.context_desc);
+      END;
+
+      -- Backfill existing notes into new FTS index
+      INSERT INTO notes_fts(rowid, content, summary, keywords, tags, context_desc)
+      SELECT rowid, content, summary, keywords, tags, context_desc FROM notes;
+    `);
+  }
+
   async close(): Promise<void> {
     if (this.db) {
       this.db.close();
@@ -145,45 +214,8 @@ export class SQLiteAdapter implements StorageAdapter {
       CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target_id);
     `);
 
-    // FTS5 virtual table (created separately as it can't use IF NOT EXISTS in all cases)
-    const ftsExists = db
-      .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='notes_fts'"
-      )
-      .get();
-
-    if (!ftsExists) {
-      db.exec(`
-        CREATE VIRTUAL TABLE notes_fts USING fts5(
-          content,
-          summary,
-          keywords,
-          tags,
-          context_desc,
-          content=notes,
-          content_rowid=rowid,
-          tokenize='unicode61'
-        );
-
-        -- Triggers to keep FTS index in sync
-        CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
-          INSERT INTO notes_fts(rowid, content, summary, keywords, tags, context_desc)
-          VALUES (new.rowid, new.content, new.summary, new.keywords, new.tags, new.context_desc);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
-          INSERT INTO notes_fts(notes_fts, rowid, content, summary, keywords, tags, context_desc)
-          VALUES ('delete', old.rowid, old.content, old.summary, old.keywords, old.tags, old.context_desc);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
-          INSERT INTO notes_fts(notes_fts, rowid, content, summary, keywords, tags, context_desc)
-          VALUES ('delete', old.rowid, old.content, old.summary, old.keywords, old.tags, old.context_desc);
-          INSERT INTO notes_fts(rowid, content, summary, keywords, tags, context_desc)
-          VALUES (new.rowid, new.content, new.summary, new.keywords, new.tags, new.context_desc);
-        END;
-      `);
-    }
+    // FTS5 virtual table with trigram tokenizer (supports Japanese and all Unicode)
+    this.ensureFtsTrigram(db);
 
     // Vector search table (sqlite-vec)
     if (this.vecEnabled) {
@@ -450,8 +482,17 @@ export class SQLiteAdapter implements StorageAdapter {
 
     const whereClause = conditions.join(" AND ");
 
+    // Build trigram-compatible FTS5 query
+    const ftsQuery = this.buildTrigramQuery(query);
+
+    // If all terms were too short for trigram, use LIKE fallback
+    if (!ftsQuery) {
+      return this.fallbackSearch(query, options);
+    }
+
+    params.query = ftsQuery;
+
     // FTS5 search with BM25 scoring
-    // Join notes with FTS results
     const sql = `
       SELECT n.*,
              bm25(notes_fts, 1.0, 0.8, 0.6, 0.6, 0.5) as score
@@ -468,11 +509,18 @@ export class SQLiteAdapter implements StorageAdapter {
         Record<string, unknown> & { score: number }
       >;
 
-      return rows.map((row) => ({
+      let results = rows.map((row) => ({
         note: this.rowToNote(row),
         score: Math.abs(row.score as number), // BM25 returns negative values in SQLite
         match_type: "fts" as const,
       }));
+
+      // If FTS returned no results, fall back to LIKE search
+      if (results.length === 0) {
+        results = this.fallbackSearch(query, options);
+      }
+
+      return results;
     } catch (error) {
       // If the query syntax is invalid for FTS5, try a simple LIKE fallback
       if (
@@ -483,6 +531,37 @@ export class SQLiteAdapter implements StorageAdapter {
       }
       throw error;
     }
+  }
+
+  /**
+   * Build a trigram-compatible FTS5 MATCH query.
+   *
+   * If the query already contains FTS5 operators (AND, OR, NOT, quotes),
+   * pass it through as-is. Otherwise, split on whitespace, filter to terms
+   * with 3+ characters (trigram minimum), wrap each in quotes, and join with AND.
+   *
+   * Returns null if no terms are long enough for trigram (caller should use LIKE fallback).
+   *
+   * Examples:
+   *   "記憶検索 仕組み engram" → '"記憶検索" AND "仕組み" AND "engram"'
+   *   "React TypeScript"      → '"React" AND "TypeScript"'
+   *   '"auth" OR "token"'     → '"auth" OR "token"'  (pass-through)
+   *   "AI 技術"               → null  (all terms < 3 chars)
+   */
+  private buildTrigramQuery(query: string): string | null {
+    // If query already contains FTS5 operators or quotes, pass through
+    if (/\b(AND|OR|NOT)\b/.test(query) || query.includes('"')) {
+      return query;
+    }
+
+    const terms = query
+      .trim()
+      .split(/\s+/)
+      .filter((t) => t.length >= 3); // trigram requires 3+ characters
+
+    if (terms.length === 0) return null;
+
+    return terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" AND ");
   }
 
   /**

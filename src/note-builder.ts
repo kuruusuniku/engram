@@ -153,9 +153,16 @@ export class NoteBuilder {
     // Strategy 2: Keyword overlap
     if (note.keywords && note.keywords.length > 0) {
       try {
-        // Search for notes with matching keywords using FTS
-        // Quote each keyword to avoid FTS5 syntax issues with special characters
-        const keywordQuery = note.keywords
+        // Search for notes with matching keywords using FTS (trigram-compatible)
+        // Trigram requires 3+ char terms; short terms use LIKE fallback via adapter
+        const validTerms = note.keywords.filter((k) => k.length >= 3);
+        if (validTerms.length === 0) {
+          // All keywords too short for trigram; skip FTS-based linking
+          return suggestions
+            .sort((a, b) => b.strength - a.strength)
+            .slice(0, 5);
+        }
+        const keywordQuery = validTerms
           .map((k) => `"${k.replace(/"/g, "")}"`)
           .join(" OR ");
         const ftsResults = await this.adapter.fullTextSearch(keywordQuery, {

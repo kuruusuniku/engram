@@ -218,15 +218,15 @@ describe("NoteBuilder", () => {
       const note1 = await adapter.saveNote({
         tenant_id: tenantId,
         role: "user",
-        content: "How to implement authentication with JWT",
-        keywords: ["JWT", "authentication", "security"],
+        content: "How to implement authentication with JSON Web Tokens",
+        keywords: ["authentication", "security", "token"],
         tags: ["backend"],
       });
       const note2 = await adapter.saveNote({
         tenant_id: tenantId,
         role: "assistant",
-        content: "JWT authentication implementation guide",
-        keywords: ["JWT", "authentication", "implementation"],
+        content: "Token-based authentication implementation guide",
+        keywords: ["authentication", "implementation", "token"],
         tags: ["backend"],
       });
       const note3 = await adapter.saveNote({
@@ -243,27 +243,16 @@ describe("NoteBuilder", () => {
         adapter
       );
 
-      const newNote: Note = {
-        note_id: "new-note",
-        tenant_id: tenantId,
-        role: "user",
-        content: "JWT token refresh strategy for authentication",
-        keywords: ["JWT", "authentication", "token-refresh"],
-        importance: 0,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-
       // We need to actually save this note first for FTS to find it
       const saved = await adapter.saveNote({
         tenant_id: tenantId,
         role: "user",
-        content: "JWT token refresh strategy for authentication",
-        keywords: ["JWT", "authentication", "token-refresh"],
+        content: "Token refresh strategy for authentication",
+        keywords: ["authentication", "token", "refresh"],
       });
 
       const links = await builder.suggestLinks(
-        { ...saved, keywords: ["JWT", "authentication", "token-refresh"] },
+        { ...saved, keywords: ["authentication", "token", "refresh"] },
         { tenant_id: tenantId }
       );
 
