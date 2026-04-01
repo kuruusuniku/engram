@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * Memory MCP Server - Entry Point
  *
