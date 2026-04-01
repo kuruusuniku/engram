@@ -3,15 +3,18 @@
  *
  * Starts the MCP server over stdio transport.
  *
+ * Storage mode is auto-detected:
+ *   - TURSO_DATABASE_URL set → hybrid (local SQLite + Turso cloud sync)
+ *   - TURSO_DATABASE_URL unset → sqlite (local only)
+ *
  * Environment variables:
  *   MEMORY_DB_PATH       - Path to SQLite database file (default: ./memory.db)
  *   MEMORY_TENANT_ID     - Tenant ID (default: "default")
- *   MEMORY_STORAGE_TYPE  - Storage type: sqlite | turso | hybrid (default: sqlite)
  *   MEMORY_INDEX_PATH    - Path to MEMORY.md (auto-generated index, optional)
  *   CLAUDE_MD_PATH       - Path to CLAUDE.md (project context, optional)
  *   OPENAI_API_KEY       - OpenAI API key for embeddings + LLM structuring (optional)
- *   TURSO_DATABASE_URL   - Turso database URL (for turso/hybrid mode)
- *   TURSO_AUTH_TOKEN     - Turso auth token (for turso/hybrid mode)
+ *   TURSO_DATABASE_URL   - Turso database URL (auto-enables hybrid mode)
+ *   TURSO_AUTH_TOKEN     - Turso auth token
  *   MEMORY_SYNC_INTERVAL - Hybrid sync interval in ms (default: 30000)
  *   MEMORY_SYNC_ON_WRITE - Sync to cloud on every write (default: false)
  */
@@ -24,17 +27,20 @@ import { createLogger } from "./logger.js";
 const log = createLogger("main");
 
 async function main(): Promise<void> {
-  const storageType =
-    (process.env.MEMORY_STORAGE_TYPE as StorageConfig["type"]) || "sqlite";
   const dbPath = process.env.MEMORY_DB_PATH || "./memory.db";
   const tenantId = process.env.MEMORY_TENANT_ID || "default";
+  const tursoUrl = process.env.TURSO_DATABASE_URL;
+  const tursoAuthToken = process.env.TURSO_AUTH_TOKEN;
+
+  // Auto-detect: Turso URL present → hybrid, otherwise → sqlite
+  const storageType: StorageConfig["type"] = tursoUrl ? "hybrid" : "sqlite";
 
   const config: StorageConfig = {
     type: storageType,
     dbPath,
     tenantId,
-    tursoUrl: process.env.TURSO_DATABASE_URL,
-    tursoAuthToken: process.env.TURSO_AUTH_TOKEN,
+    tursoUrl,
+    tursoAuthToken,
     syncIntervalMs: process.env.MEMORY_SYNC_INTERVAL
       ? parseInt(process.env.MEMORY_SYNC_INTERVAL, 10)
       : undefined,
@@ -48,6 +54,7 @@ async function main(): Promise<void> {
     type: config.type,
     db: config.dbPath,
     tenant: config.tenantId,
+    turso: tursoUrl ? "connected" : "none",
   });
   if (memoryIndexPath) {
     log.info("MEMORY.md index configured", { path: memoryIndexPath });

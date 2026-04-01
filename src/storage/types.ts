@@ -126,6 +126,12 @@ export interface SummaryOptions {
 // --- Config ---
 
 export interface StorageConfig {
+  /**
+   * Storage type — auto-detected when omitted:
+   *   - "hybrid" if TURSO_DATABASE_URL is set (local SQLite + Turso cloud sync)
+   *   - "sqlite" otherwise (local SQLite only)
+   *   - "turso" is kept for internal/migration use only
+   */
   type: "sqlite" | "turso" | "hybrid";
   /** Local SQLite file path */
   dbPath?: string;
